@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import time
+import subprocess
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
@@ -26,10 +27,16 @@ VALID_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py", ".md"}
 # Skip noisy folders that aren't real source code
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv"}
 
-# How many lines per chunk. Simple line-based chunking for v1 --
-# AST-aware (function-level) chunking is a planned upgrade.
+# How many lines per chunk. Line-based chunking is the fallback for
+# file types the AST chunker doesn't handle (.py, .md), or if AST
+# parsing fails on a malformed/unusual JS file.
 CHUNK_LINES = 40
 CHUNK_OVERLAP = 5
+
+# File types the AST chunker (Babel) understands.
+AST_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx"}
+
+AST_CHUNKER_PATH = Path(__file__).parent / "ast_chunk.js"
 
 
 def find_source_files(root_dir):
@@ -43,8 +50,52 @@ def find_source_files(root_dir):
     return files
 
 
-def chunk_file(filepath):
-    """Split one file into overlapping line-based chunks."""
+def ast_chunk_file(filepath):
+    """
+    Chunk a JS/TS file by function/class using ast_chunk.js (Babel).
+    Returns None if parsing fails, so the caller can fall back to
+    line-based chunking instead of losing the file entirely.
+    """
+    try:
+        result = subprocess.run(
+            ["node", str(AST_CHUNKER_PATH), str(filepath)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",       # ✅ force UTF-8
+            errors="ignore",        # ✅ skip bad characters
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  AST chunker unavailable for {filepath}: {e}")
+        return None
+
+    if result.returncode != 0 or not result.stdout:
+        # ast_chunk.js prints PARSE_ERROR to stderr and exits 1 on bad syntax
+        print(f"  AST parse failed for {filepath}, falling back to line chunks")
+        return None
+
+    try:
+        raw_chunks = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        print(f"  JSON decode error for {filepath}: {e}")
+        return None
+
+    chunks = []
+    for c in raw_chunks:
+        chunks.append(
+            {
+                "text": c["text"],
+                "source": str(filepath),
+                "start_line": c["start_line"],
+                "end_line": c["end_line"],
+                "label": c.get("label"),
+            }
+        )
+    return chunks
+
+
+def line_chunk_file(filepath):
+    """Split one file into overlapping line-based chunks. Fallback strategy."""
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
@@ -60,6 +111,7 @@ def chunk_file(filepath):
                     "source": str(filepath),
                     "start_line": start + 1,
                     "end_line": end,
+                    "label": None,
                 }
             )
         if end == len(lines):
@@ -67,6 +119,22 @@ def chunk_file(filepath):
         start += CHUNK_LINES - CHUNK_OVERLAP
 
     return chunks
+
+
+def chunk_file(filepath):
+    """
+    Pick the right chunking strategy for this file.
+    JS/TS files get AST-aware (function/class-level) chunking.
+    Everything else, or any file where AST parsing fails, gets
+    line-based chunking as a safe fallback.
+    """
+    if filepath.suffix in AST_EXTENSIONS:
+        chunks = ast_chunk_file(filepath)
+        if chunks is not None:
+            return chunks
+        # fall through to line-based if AST chunking returned None
+
+    return line_chunk_file(filepath)
 
 
 def embed_chunk(text):
@@ -104,13 +172,13 @@ def main():
     if output_path.exists():
         with open(output_path, "r") as f:
             vector_store = json.load(f)
-        already_done = {(c["source"], c["start_line"]) for c in vector_store}
+        already_done = {(c["source"], c["start_line"], c.get("label")) for c in vector_store}
         print(f"Found existing progress: {len(vector_store)} chunks already embedded. Resuming...")
 
     SAVE_EVERY = 10  # write progress to disk periodically, not just at the end
 
     for i, chunk in enumerate(all_chunks):
-        key = (chunk["source"], chunk["start_line"])
+        key = (chunk["source"], chunk["start_line"], chunk.get("label"))
         if key in already_done:
             continue  # already embedded in a previous run
 
@@ -126,6 +194,7 @@ def main():
                 "source": chunk["source"],
                 "start_line": chunk["start_line"],
                 "end_line": chunk["end_line"],
+                "label": chunk.get("label"),
                 "embedding": embedding,
             }
         )

@@ -22,8 +22,9 @@ def build_prompt(question, chunks):
     """Stuff retrieved chunks into a prompt that grounds the model's answer."""
     context_blocks = []
     for chunk in chunks:
+        label_info = f" [{chunk['label']}]" if chunk.get("label") else ""
         block = (
-            f"File: {chunk['source']} (lines {chunk['start_line']}-{chunk['end_line']})\n"
+            f"File: {chunk['source']} (lines {chunk['start_line']}-{chunk['end_line']}){label_info}\n"
             f"{chunk['text']}"
         )
         context_blocks.append(block)
