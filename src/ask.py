@@ -76,7 +76,7 @@ def main():
     print("=" * 60)
     print("\nSources retrieved:")
     for s in sources_used:
-        print(f"  - {s['source']} (lines {s['start_line']}-{s['end_line']})")
+        print(f"  - [{s['similarity_score']}] {s['source']} (lines {s['start_line']}-{s['end_line']})")
 
 
 if __name__ == "__main__":

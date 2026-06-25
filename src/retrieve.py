@@ -50,7 +50,10 @@ def retrieve_top_k(question, k=4):
         scored.append((score, chunk))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = [chunk for score, chunk in scored[:k]]
+    top_chunks = []
+    for score, chunk in scored[:k]:
+        chunk_with_score = {**chunk, "similarity_score": round(score, 4)}
+        top_chunks.append(chunk_with_score)
 
     return top_chunks
 
